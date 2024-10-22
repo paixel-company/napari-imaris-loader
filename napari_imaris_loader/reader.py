@@ -2,23 +2,23 @@
 """
 Created on Tue Apr 27 20:40:39 2021
 
-@author:AlanMWatson
+@author: AlanMWatson
 
 Napari plugin for reading imaris files as a multiresolution series.
-    
-NOTE:  Currently "File/Preferences/Render Images Asynchronously" must be turned on for this plugin to work
 
-*** Issues remain with indexing and the shape of returned arrays.  
- 1) It is unclear if there is an issue with how I am implementing slicing in the ims module
- 2) Different expections from napari on the state of the data that is returned between the Image and Chunk_loader methods in ims module
+NOTE: Currently "File/Preferences/Render Images Asynchronously" must be turned on for this plugin to work
 
-** It appears that napari is only requesting 2D (YX) chunks from the loader during 2D rendering 
-which limits the utility of the async chunk_loader.  
+*** Issues remain with indexing and the shape of returned arrays.
+1) It is unclear if there is an issue with how I am implementing slicing in the ims module
+2) Different expectations from napari on the state of the data that is returned between the Image and Chunk_loader methods in ims module
 
-*Future implemetation of caching in RAM and persistantly on disk is planned via ims module - currently disabled
+** It appears that napari is only requesting 2D (YX) chunks from the loader during 2D rendering
+which limits the utility of the async chunk_loader.
+
+*Future implementation of caching in RAM and persistently on disk is planned via ims module - currently disabled
 RAM Cache may be redundant to napari cache unless we can implement 3D chunk caching
 Disk cache may allow for loaded chunks to be stored to SSD for rapid future retrieval
-with options to maintain this cache persistantly accross sessions.
+with options to maintain this cache persistently across sessions.
 """
 
 import os
@@ -28,219 +28,131 @@ from imaris_ims_file_reader.ims import ims
 
 from napari_plugin_engine import napari_hook_implementation
 
+def ims_reader(path, resLevel='max', colorsIndependant=False, preCache=False):
+    # Ensure NAPARI_ASYNC is enabled for asynchronous loading
+    os.environ["NAPARI_ASYNC"] = "1"
 
+    # Load the ims file
+    squeeze_output = False  # Do not squeeze to preserve dimensions
+    imsClass = ims(path, squeeze_output=squeeze_output)
 
-    
-"""
-Is this a bug in napari or specific to this reader?
-
-path = "...\napari-env\Lib\site-packages\napari\layers\image\image.py"
-Line 619-620
-should read:
-indices[d] = slice(
-                    int(self.corner_pixels[0, d]),
-                    int(self.corner_pixels[1, d] + 1),
-                    1,
-                    )
-
-start/stop values of the slice must be coerced to int otherwise an error
-is thrown when switching from 3D to 2D view
-
-###  NOTE: This may no longer be a problem
-
-"""
-    
-
-
-def ims_reader(path,resLevel='max', colorsIndependant=False, preCache=False):
-    
-# path = r"Z:\testData\bitplaneConverter.ims"  ## Dataset for testing
-#print('I AM IN THE READER')
-
-# path = r"Z:\toTest\bil\download.brainimagelibrary.org\2b\da\2bdaf9e66a246844\mouseID_405429-182725\CH1_0.35_100um\ch1_0.35_100um.ims"
-# path = r"Z:\testData\2D\1time_1color_composite_z500_c488.ims"
-    
-    squeeze_output = True
-    imsClass = ims(path,squeeze_output=squeeze_output)
-    
+    # Attempt to extract contrast limits from the lowest resolution level
     try:
         # Extract minimum resolution level and calculate contrast limits
-        minResolutionLevel = imsClass[imsClass.ResolutionLevels-1,:,:,:,:,:]
-        minContrast = minResolutionLevel[minResolutionLevel>0].min()
+        minResolutionLevel = imsClass[imsClass.ResolutionLevels - 1, :, :, :, :, :]
+        minContrast = minResolutionLevel[minResolutionLevel > 0].min()
         maxContrast = minResolutionLevel.max()
-        contrastLimits = [minContrast,maxContrast]
-    
+        contrastLimits = [minContrast, maxContrast]
     except Exception:
-        if imsClass.dtype==np.dtype('uint16'):
-            contrastLimits = [0, 65534]
-        elif imsClass.dtype==np.dtype('uint8'):
-            contrastLimits = [0, 254]
-        else: 
-            contrastLimits = [0,1]
-    
-    
+        # Fallback contrast limits based on data type
+        if imsClass.dtype == np.dtype('uint16'):
+            contrastLimits = [0, 65535]
+        elif imsClass.dtype == np.dtype('uint8'):
+            contrastLimits = [0, 255]
+        else:
+            contrastLimits = [0, 1]
 
-    
-    ## Enable async loading of tiles
-    os.environ["NAPARI_ASYNC"] = "1"
-    # os.environ['NAPARI_OCTREE'] = "1"
-    
-    
-    
-    # cache = Cache(10e9)  # Leverage two gigabytes of memory
-    # cache.register()    # Turn cache on globally
-    
-    ## Display current Channel Names
+    # Prepare channel names
     channelNames = []
     for cc in range(imsClass.Channels):
-        channelNames.append('Channel {}'.format(cc))
+        channelNames.append(f'Channel {cc}')
     if len(channelNames) == 1:
         channelNames = channelNames[0]
-        
-    
+
+    # Load data for each resolution level
     data = []
     for rr in range(imsClass.ResolutionLevels):
-        print('Loading resolution level {}'.format(rr))
-        data.append(ims(path,ResolutionLevelLock=rr,cache_location=imsClass.cache_location,squeeze_output=squeeze_output))
-        
-    # for ii in data:
-    #     print(ii.ResolutionLevelLock)
-        
-    chunks = True
-    for idx,_ in enumerate(data):
-        data[idx] = da.from_array(data[idx],
-                                  chunks=data[idx].chunks if chunks == True else (1,1,data[idx].shape[-3],data[idx].shape[-2],data[idx].shape[-1]),
-                                  fancy=False
-                                  )
-    
-    print(data)
-    # Base metadata that apply to all senarios
+        print(f'Loading resolution level {rr}')
+        data.append(ims(path, ResolutionLevelLock=rr, cache_location=imsClass.cache_location, squeeze_output=squeeze_output))
+
+    # Convert data to Dask arrays with appropriate chunking
+    for idx, _ in enumerate(data):
+        data[idx] = da.from_array(
+            data[idx],
+            chunks=data[idx].chunks,
+            fancy=False
+        )
+
+    # Base metadata that applies to all scenarios
     meta = {
         "contrast_limits": contrastLimits,
         "name": channelNames,
-        "metadata": {'fileName':imsClass.filePathComplete,
-                     'resolutionLevels':imsClass.ResolutionLevels
-                     }
+        "metadata": {
+            'fileName': imsClass.filePathComplete,
+            'resolutionLevels': imsClass.ResolutionLevels
         }
+    }
 
-    # Reslice to remove dangling single dimensions, this may not be necessary anymore
-    inwardSlice = 0
-    for ii in range(len(imsClass.shape)):
-        if imsClass.shape[ii] == 1:
-            inwardSlice += 1
-        else:
-            break
-    
-    if inwardSlice == 0:
-        for idx,_ in enumerate(data):
-            meta['channel_axis'] = 1
-    elif inwardSlice == 1:
-        for idx,_ in enumerate(data):
-            data[idx] = data[idx][0]
-            meta['channel_axis'] = 0
-    elif inwardSlice == 2:
-        for idx,_ in enumerate(data):
-            data[idx] = data[idx][0,0]
-            meta['channel_axis'] = None
-    elif inwardSlice == 3:
-        for idx,_ in enumerate(data):
-            data[idx] = data[idx][0,0,0]
-            meta['channel_axis'] = None
-    elif inwardSlice == 4:
-        for idx,_ in enumerate(data):
-            data[idx] = data[idx][0,0,0,0]
-            meta['channel_axis'] = None
+    # Determine the channel axis
+    if imsClass.TimePoints > 1:
+        channel_axis = 1  # Assume time axis is first
+    elif imsClass.Channels > 1:
+        channel_axis = 0
+    else:
+        channel_axis = None
 
-    # Remove single color dims, this may not be necessary
-    if len(data) >= 1 and data[0].ndim >= 4 and data[0].shape[-4] == 1:
-        for idx,_ in enumerate(data):
-            data[idx] = data[idx][...,0,:,:,:]
-        meta['channel_axis'] = None
-    
-    # # Remove single Z dims, this may not be necessary, may cause scal issues 
-    # if len(data) >= 3 and data[0].shape[-3] == 1:
-    #     for idx,_ in enumerate(data):
-    #         data[idx] = data[idx][...,0,:,:]
-    
-    ## Possibility of implementing rapid caching of some data (lower resolution levels?) prior to visualization.
-    ## done by calling a simple calculation over the whole dask array da.min()?
-    # if preCache == True:
-    #     for idx,dd in enumerate(reversed(data)):
-    #         print('Caching resolution level {}'.format(len(data)-idx-1))
-    #         for ii in range(imsClass.Channels):
-    #             dd[0,ii].min().compute()
-    #         if idx == 2:
-    #             break
+    meta['channel_axis'] = channel_axis
 
-    # Option to cut off lower resolutions to improve 3D rendering
-    # May provide a widgit that can impletment this after the dataset is loaded
-    if isinstance(resLevel,int) and resLevel+1 > len(data):
-        raise ValueError('Selected resolution level is too high:  Options are between 0 and {}'.format(imsClass.ResolutionLevels-1))
-    
-    data = data if resLevel=='max' else data[:resLevel+1]
-    print(data)
-    
-    # Set multiscale based on whether multiple resolutions are present
+    # Ensure data shape is consistent and includes channel axis
+    for idx in range(len(data)):
+        # Expand dimensions if necessary to include channel axis
+        if channel_axis is not None and data[idx].ndim < 4:
+            data[idx] = data[idx][np.newaxis, ...]  # Add channel axis
+
+    # Print data shapes for debugging
+    print("Data shape after processing:", data[0].shape)
+
+    # Set multiscale based on the number of resolution levels
     meta["multiscale"] = True if len(data) > 1 else False
-    
-    ## Extract Voxel Spacing
-    scale = imsClass.resolution
-    scale = scale[-2::] if len(data[0].shape) == 2 else scale #Reduces scale to 2dim when a single color 2D dataset
-    scale = [tuple(scale)]*imsClass.Channels
-    
-    meta["scale"] = scale if len(scale) > 1 else scale[0]
-    
 
-    if colorsIndependant and 'channel_axis' in meta and meta['channel_axis'] is not None:
-        channelAxis = meta['channel_axis']
-        
+    # Extract voxel spacing (scale)
+    scale = imsClass.resolution
+    # Adjust scale length to match data dimensions
+    if data[0].ndim == len(scale) + 1:
+        scale = (1,) + tuple(scale)  # Add scale for channel axis
+    else:
+        scale = tuple(scale)
+    meta["scale"] = scale
+
+    # Optionally limit the number of resolution levels
+    if isinstance(resLevel, int):
+        if resLevel + 1 > len(data):
+            raise ValueError(f'Selected resolution level is too high: Options are between 0 and {imsClass.ResolutionLevels - 1}')
+        data = data[:resLevel + 1]
+
+    # Handle independent colors (channels)
+    if colorsIndependant and channel_axis is not None:
         channelData = []
-        for cc in range(data[0].shape[channelAxis]):
+        num_channels = data[0].shape[channel_axis]
+        for cc in range(num_channels):
             singleChannel = []
             for dd in data:
-                if channelAxis == 0:
-                    singleChannel.append(dd[cc])
-                elif channelAxis == 1:
-                    singleChannel.append(dd[:,cc])
+                singleChannel.append(dd.take(cc, axis=channel_axis))
             channelData.append(singleChannel)
-                    
-        del(meta['channel_axis'])
-        
+
+        del meta['channel_axis']  # Remove channel_axis from metadata
+
+        # Create metadata for each channel
         metaData = []
-        for cc in range(data[0].shape[channelAxis]):
-            singleChannel = {
-                'contrast_limits':meta['contrast_limits'],
-                'multiscale':meta['multiscale'],
-                'metadata':meta['metadata'],
-                'scale':meta['scale'][cc],
-                'name':meta['name'][cc]
-                             }
-            metaData.append(singleChannel)
-        
+        for cc in range(num_channels):
+            singleChannelMeta = {
+                'contrast_limits': meta['contrast_limits'],
+                'multiscale': meta['multiscale'],
+                'metadata': meta['metadata'],
+                'scale': meta['scale'],
+                'name': meta['name'][cc] if isinstance(meta['name'], list) else meta['name']
+            }
+            metaData.append(singleChannelMeta)
+
+        # Prepare the final output
         finalOutput = []
-        for dd,mm in zip(channelData,metaData):
-            if len(dd) > 1:
-                finalOutput.append(
-                    (dd,mm)
-                    )
-            else:
-                finalOutput.append(
-                    (dd[0],mm)
-                    )
+        for dd, mm in zip(channelData, metaData):
+            finalOutput.append((dd, mm))
         return finalOutput
-    
-    
     else:
-        return [(data if len(data) > 1 else data[0],meta)]
-        
-
-
+        return [(data, meta)] if meta["multiscale"] else [(data[0], meta)]
 
 @napari_hook_implementation
 def napari_get_reader(path):
-    if isinstance(path,str) and os.path.splitext(path)[1].lower() == '.ims':
+    if isinstance(path, str) and os.path.splitext(path)[1].lower() == '.ims':
         return ims_reader
-
-
-
-                
