@@ -8,26 +8,20 @@ from napari.types import LayerDataTuple
 
 @magic_factory(
     auto_call=False,
-    call_button="Update",
-    lowest_resolution_level={
-        'min': 0,
-        'max': 9,
-        'tooltip': '''Important only for 3D rendering.
-        Higher number is lower resolution.'''
-    }
+    call_button="Update"
 )
 def resolution_change(
     viewer: napari.Viewer,
-    lowest_resolution_level: int
+    lowest_resolution_level: int = 0
 ):
-    '''
+    """
     该面板提供了一个工具，用于在选择最低分辨率级别后重新加载 IMS 数据，
     该级别将包含在多分辨率系列中。较高的数字（即金字塔顶部）=较低的分辨率。
 
     这对于 3D 渲染很重要。如果您希望更高分辨率的 3D 渲染，可以选择较低的数字，更新视图，然后选择 3D 渲染。
-    '''
+    """
 
-    # 查找元数据中包含 'fileName' 的第一个图层
+    # 查找元数据中包含 'fileName' 的第一个 IMS 图层
     ims_layer = None
     for layer in viewer.layers:
         if isinstance(layer, Image) and 'fileName' in layer.metadata:
@@ -36,6 +30,17 @@ def resolution_change(
 
     if ims_layer is None:
         print("未找到元数据中包含 'fileName' 的 IMS 图层。")
+        return
+
+    # 获取可用的分辨率级别数量
+    available_levels = ims_layer.metadata.get('resolutionLevels', None)
+    if available_levels is None:
+        print("无法获取可用的分辨率级别数量。")
+        return
+
+    # 验证 lowest_resolution_level 是否在有效范围内
+    if lowest_resolution_level < 0 or lowest_resolution_level >= available_levels:
+        print(f"所选的分辨率级别无效。请选择 0 到 {available_levels - 1} 之间的值。")
         return
 
     # 使用加载函数加载 IMS 文件的数据
@@ -90,10 +95,11 @@ def resolution_change(
 
     # 将新图层添加回 viewer
     for data, meta in tupleOut:
+        print(f"Adding layer {meta['name']} with data shape {data[0].shape}")
         viewer.add_image(data, **meta)
 
-    # 不需要返回任何内容
-
+    # 将 viewer 切换回原来的显示模式（如果需要）
+    # viewer.dims.ndisplay = 3  # 如果您想在更新后切换回 3D 模式，可以取消注释
 
 @napari_hook_implementation
 def napari_experimental_provide_dock_widget():

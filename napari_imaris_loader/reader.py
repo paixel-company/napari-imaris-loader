@@ -1,27 +1,42 @@
+# napari_imaris_loader.py
+
 import os
 import numpy as np
 import dask.array as da
+import napari
+from magicgui import magic_factory
+from napari_plugin_engine import napari_hook_implementation
+from napari.layers import Image
+from napari.types import LayerDataTuple
+from typing import List, Tuple, Any
+
+# 确保已安装 imaris_ims_file_reader 库
+# pip install imaris_ims_file_reader
 from imaris_ims_file_reader.ims import ims
 
-from napari_plugin_engine import napari_hook_implementation
-
-def ims_reader(path, resLevel='max', colorsIndependant=False, preCache=False):
-    # Ensure NAPARI_ASYNC is enabled for asynchronous loading
+def ims_reader(path: str, resLevel: int = 0, colorsIndependant: bool = False, preCache: bool = False) -> List[Tuple[Any, dict]]:
+    """
+    读取 .ims 文件并返回可用于 napari 的数据和元数据。
+    """
+    # 确保启用了异步加载
     os.environ["NAPARI_ASYNC"] = "1"
 
-    # Load the ims file
-    squeeze_output = False  # Do not squeeze to preserve dimensions
+    # 加载 ims 文件
+    squeeze_output = False  # 不进行 squeeze，以保持维度
     imsClass = ims(path, squeeze_output=squeeze_output)
 
-    # Attempt to extract contrast limits from the lowest resolution level
+    # 输出可用的分辨率级别数量
+    print(f"Available resolution levels: {imsClass.ResolutionLevels}")
+
+    # 尝试从最低分辨率级别提取对比度限制
     try:
-        # Extract minimum resolution level and calculate contrast limits
+        # 提取最低分辨率级别并计算对比度限制
         minResolutionLevel = imsClass[imsClass.ResolutionLevels - 1, :, :, :, :, :]
         minContrast = minResolutionLevel[minResolutionLevel > 0].min()
         maxContrast = minResolutionLevel.max()
         contrastLimits = [minContrast, maxContrast]
     except Exception:
-        # Fallback contrast limits based on data type
+        # 根据数据类型设置默认对比度限制
         if imsClass.dtype == np.dtype('uint16'):
             contrastLimits = [0, 65535]
         elif imsClass.dtype == np.dtype('uint8'):
@@ -29,28 +44,34 @@ def ims_reader(path, resLevel='max', colorsIndependant=False, preCache=False):
         else:
             contrastLimits = [0, 1]
 
-    # Prepare channel names
-    channelNames = []
-    for cc in range(imsClass.Channels):
-        channelNames.append(f'Channel {cc}')
-    if len(channelNames) == 1:
-        channelNames = channelNames[0]
+    # 准备通道名称
+    channelNames = [f'Channel {cc}' for cc in range(imsClass.Channels)]
 
-    # Load data for each resolution level
+    # 加载每个分辨率级别的数据
     data = []
     for rr in range(imsClass.ResolutionLevels):
         print(f'Loading resolution level {rr}')
         data.append(ims(path, ResolutionLevelLock=rr, cache_location=imsClass.cache_location, squeeze_output=squeeze_output))
 
-    # Convert data to Dask arrays with appropriate chunking
-    for idx, _ in enumerate(data):
+    # 将数据转换为具有适当分块的 Dask 数组
+    for idx in range(len(data)):
         data[idx] = da.from_array(
             data[idx],
             chunks=data[idx].chunks,
             fancy=False
         )
 
-    # Base metadata that applies to all scenarios
+    # 可选地限制分辨率级别的数量
+    if isinstance(resLevel, int):
+        if resLevel < 0 or resLevel >= len(data):
+            raise ValueError(f'所选分辨率级别无效：请选择 0 到 {len(data) - 1} 之间的值')
+        data = data[resLevel:]
+
+    # 打印数据形状
+    for idx, level_data in enumerate(data):
+        print(f"Resolution level {idx + resLevel} data shape: {level_data.shape}")
+
+    # 基础元数据
     meta = {
         "contrast_limits": contrastLimits,
         "name": channelNames,
@@ -60,7 +81,7 @@ def ims_reader(path, resLevel='max', colorsIndependant=False, preCache=False):
         }
     }
 
-    # Determine the channel axis based on data shape and imsClass.Channels
+    # 确定通道轴
     channel_axis = None
     for idx, dim in enumerate(data[0].shape):
         if dim == imsClass.Channels and imsClass.Channels > 1:
@@ -69,40 +90,32 @@ def ims_reader(path, resLevel='max', colorsIndependant=False, preCache=False):
 
     meta['channel_axis'] = channel_axis
 
-    # Ensure data shape is consistent and includes channel axis
+    # 确保数据形状一致，并包含通道轴
     for idx in range(len(data)):
-        # Expand dimensions if necessary to include channel axis
         if channel_axis is not None and data[idx].ndim <= channel_axis:
             data[idx] = np.expand_dims(data[idx], axis=channel_axis)
 
-    # Set multiscale based on the number of resolution levels
+    # 设置 multiscale 参数
     meta["multiscale"] = True if len(data) > 1 else False
 
-    # Optionally limit the number of resolution levels
-    if isinstance(resLevel, int):
-        if resLevel + 1 > len(data):
-            raise ValueError(f'Selected resolution level is too high: Options are between 0 and {imsClass.ResolutionLevels - 1}')
-        data = data[:resLevel + 1]
-
-    # Handle independent colors (channels)
+    # 处理独立的颜色（通道）
     if colorsIndependant and channel_axis is not None:
         channelData = []
         num_channels = data[0].shape[channel_axis]
         for cc in range(num_channels):
             singleChannel = []
             for dd in data:
-                # Use slicing to extract the channel
                 indexer = [slice(None)] * dd.ndim
                 indexer[channel_axis] = cc
                 singleChannel.append(dd[tuple(indexer)])
             channelData.append(singleChannel)
 
-        del meta['channel_axis']  # Remove channel_axis from metadata
+        del meta['channel_axis']  # 从元数据中删除 channel_axis
 
-        # Create metadata for each channel
+        # 为每个通道创建元数据
         metaData = []
         for cc in range(num_channels):
-            # Adjust scale for each channel
+            # 根据每个通道调整 scale
             data_shape = channelData[cc][0].shape
             extra_dims = len(data_shape) - len(imsClass.resolution)
             singleChannelScale = (1,) * extra_dims + tuple(imsClass.resolution)
@@ -112,24 +125,24 @@ def ims_reader(path, resLevel='max', colorsIndependant=False, preCache=False):
                 'multiscale': meta['multiscale'],
                 'metadata': meta['metadata'],
                 'scale': singleChannelScale,
-                'name': meta['name'][cc] if isinstance(meta['name'], list) else meta['name']
+                'name': meta['name'][cc]
             }
             metaData.append(singleChannelMeta)
 
-        # Prepare the final output
+        # 准备最终输出
         finalOutput = []
         for dd, mm in zip(channelData, metaData):
             finalOutput.append((dd, mm))
         return finalOutput
     else:
-        # Adjust scale for combined data
+        # 调整组合数据的 scale
         data_shape = data[0].shape
         extra_dims = len(data_shape) - len(imsClass.resolution)
         scale = (1,) * extra_dims + tuple(imsClass.resolution)
 
-        # If channel_axis is specified, adjust scale for per-channel data
+        # 如果指定了 channel_axis，调整每个通道的数据的 scale
         if channel_axis is not None:
-            # After splitting, data per channel will have one less dimension
+            # 拆分后，每个通道的数据将减少一个维度
             per_channel_shape = data_shape[:channel_axis] + data_shape[channel_axis + 1:]
             per_channel_extra_dims = len(per_channel_shape) - len(imsClass.resolution)
             per_channel_scale = (1,) * per_channel_extra_dims + tuple(imsClass.resolution)
