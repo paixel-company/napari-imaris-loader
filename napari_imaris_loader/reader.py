@@ -1,26 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-Created on Tue Apr 27 20:40:39 2021
-
-@author: AlanMWatson
-
-Napari plugin for reading imaris files as a multiresolution series.
-
-NOTE: Currently "File/Preferences/Render Images Asynchronously" must be turned on for this plugin to work
-
-*** Issues remain with indexing and the shape of returned arrays.
-1) It is unclear if there is an issue with how I am implementing slicing in the ims module
-2) Different expectations from napari on the state of the data that is returned between the Image and Chunk_loader methods in ims module
-
-** It appears that napari is only requesting 2D (YX) chunks from the loader during 2D rendering
-which limits the utility of the async chunk_loader.
-
-*Future implementation of caching in RAM and persistently on disk is planned via ims module - currently disabled
-RAM Cache may be redundant to napari cache unless we can implement 3D chunk caching
-Disk cache may allow for loaded chunks to be stored to SSD for rapid future retrieval
-with options to maintain this cache persistently across sessions.
-"""
-
 import os
 import numpy as np
 import dask.array as da
@@ -83,36 +60,23 @@ def ims_reader(path, resLevel='max', colorsIndependant=False, preCache=False):
         }
     }
 
-    # Determine the channel axis
-    if imsClass.TimePoints > 1:
-        channel_axis = 1  # Assume time axis is first
-    elif imsClass.Channels > 1:
-        channel_axis = 0
-    else:
-        channel_axis = None
+    # Determine the channel axis based on data shape and imsClass.Channels
+    channel_axis = None
+    for idx, dim in enumerate(data[0].shape):
+        if dim == imsClass.Channels and imsClass.Channels > 1:
+            channel_axis = idx
+            break
 
     meta['channel_axis'] = channel_axis
 
     # Ensure data shape is consistent and includes channel axis
     for idx in range(len(data)):
         # Expand dimensions if necessary to include channel axis
-        if channel_axis is not None and data[idx].ndim < 4:
-            data[idx] = data[idx][np.newaxis, ...]  # Add channel axis
-
-    # Print data shapes for debugging
-    print("Data shape after processing:", data[0].shape)
+        if channel_axis is not None and data[idx].ndim <= channel_axis:
+            data[idx] = np.expand_dims(data[idx], axis=channel_axis)
 
     # Set multiscale based on the number of resolution levels
     meta["multiscale"] = True if len(data) > 1 else False
-
-    # Extract voxel spacing (scale)
-    scale = imsClass.resolution
-    # Adjust scale length to match data dimensions
-    if data[0].ndim == len(scale) + 1:
-        scale = (1,) + tuple(scale)  # Add scale for channel axis
-    else:
-        scale = tuple(scale)
-    meta["scale"] = scale
 
     # Optionally limit the number of resolution levels
     if isinstance(resLevel, int):
@@ -127,7 +91,10 @@ def ims_reader(path, resLevel='max', colorsIndependant=False, preCache=False):
         for cc in range(num_channels):
             singleChannel = []
             for dd in data:
-                singleChannel.append(dd.take(cc, axis=channel_axis))
+                # Use slicing to extract the channel
+                indexer = [slice(None)] * dd.ndim
+                indexer[channel_axis] = cc
+                singleChannel.append(dd[tuple(indexer)])
             channelData.append(singleChannel)
 
         del meta['channel_axis']  # Remove channel_axis from metadata
@@ -135,11 +102,16 @@ def ims_reader(path, resLevel='max', colorsIndependant=False, preCache=False):
         # Create metadata for each channel
         metaData = []
         for cc in range(num_channels):
+            # Adjust scale for each channel
+            data_shape = channelData[cc][0].shape
+            extra_dims = len(data_shape) - len(imsClass.resolution)
+            singleChannelScale = (1,) * extra_dims + tuple(imsClass.resolution)
+
             singleChannelMeta = {
                 'contrast_limits': meta['contrast_limits'],
                 'multiscale': meta['multiscale'],
                 'metadata': meta['metadata'],
-                'scale': meta['scale'],
+                'scale': singleChannelScale,
                 'name': meta['name'][cc] if isinstance(meta['name'], list) else meta['name']
             }
             metaData.append(singleChannelMeta)
@@ -150,7 +122,23 @@ def ims_reader(path, resLevel='max', colorsIndependant=False, preCache=False):
             finalOutput.append((dd, mm))
         return finalOutput
     else:
+        # Adjust scale for combined data
+        data_shape = data[0].shape
+        extra_dims = len(data_shape) - len(imsClass.resolution)
+        scale = (1,) * extra_dims + tuple(imsClass.resolution)
+
+        # If channel_axis is specified, adjust scale for per-channel data
+        if channel_axis is not None:
+            # After splitting, data per channel will have one less dimension
+            per_channel_shape = data_shape[:channel_axis] + data_shape[channel_axis + 1:]
+            per_channel_extra_dims = len(per_channel_shape) - len(imsClass.resolution)
+            per_channel_scale = (1,) * per_channel_extra_dims + tuple(imsClass.resolution)
+            meta["scale"] = per_channel_scale
+        else:
+            meta["scale"] = scale
+
         return [(data, meta)] if meta["multiscale"] else [(data[0], meta)]
+
 
 @napari_hook_implementation
 def napari_get_reader(path):
