@@ -95,11 +95,12 @@ def resolution_change(
 
     # 将新图层添加回 viewer
     for data, meta in tupleOut:
-        print(f"Adding layer {meta['name']} with data shape {data[0].shape}")
+        print(f"Adding layer {meta['name']} with multiscale={meta['multiscale']} and data is list: {isinstance(data, list)}")
+        if isinstance(data, list):
+            print(f"Data is a list with {len(data)} levels. First level shape: {data[0].shape}")
+        else:
+            print(f"Data shape: {data.shape}")
         viewer.add_image(data, **meta)
-
-    # 将 viewer 切换回原来的显示模式（如果需要）
-    # viewer.dims.ndisplay = 3  # 如果您想在更新后切换回 3D 模式，可以取消注释
 
 @napari_hook_implementation
 def napari_experimental_provide_dock_widget():

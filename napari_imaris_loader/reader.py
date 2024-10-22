@@ -7,7 +7,6 @@ import napari
 from magicgui import magic_factory
 from napari_plugin_engine import napari_hook_implementation
 from napari.layers import Image
-from napari.types import LayerDataTuple
 from typing import List, Tuple, Any
 
 # 确保已安装 imaris_ims_file_reader 库
@@ -67,11 +66,7 @@ def ims_reader(path: str, resLevel: int = 0, colorsIndependant: bool = False, pr
             raise ValueError(f'所选分辨率级别无效：请选择 0 到 {len(data) - 1} 之间的值')
         data = data[resLevel:]
 
-    # 打印数据形状
-    for idx, level_data in enumerate(data):
-        print(f"Resolution level {idx + resLevel} data shape: {level_data.shape}")
-
-    # 基础元数据
+    # 在裁剪数据之后设置 multiscale 参数
     meta = {
         "contrast_limits": contrastLimits,
         "name": channelNames,
@@ -80,6 +75,11 @@ def ims_reader(path: str, resLevel: int = 0, colorsIndependant: bool = False, pr
             'resolutionLevels': imsClass.ResolutionLevels
         }
     }
+    meta["multiscale"] = True if isinstance(data, list) else False
+
+    # 打印数据形状
+    for idx, level_data in enumerate(data):
+        print(f"Resolution level {idx + resLevel} data shape: {level_data.shape}")
 
     # 确定通道轴
     channel_axis = None
@@ -94,9 +94,6 @@ def ims_reader(path: str, resLevel: int = 0, colorsIndependant: bool = False, pr
     for idx in range(len(data)):
         if channel_axis is not None and data[idx].ndim <= channel_axis:
             data[idx] = np.expand_dims(data[idx], axis=channel_axis)
-
-    # 设置 multiscale 参数
-    meta["multiscale"] = True if len(data) > 1 else False
 
     # 处理独立的颜色（通道）
     if colorsIndependant and channel_axis is not None:
@@ -120,9 +117,12 @@ def ims_reader(path: str, resLevel: int = 0, colorsIndependant: bool = False, pr
             extra_dims = len(data_shape) - len(imsClass.resolution)
             singleChannelScale = (1,) * extra_dims + tuple(imsClass.resolution)
 
+            # 判断当前通道的数据是否为多尺度
+            is_multiscale = True if isinstance(channelData[cc], list) else False
+
             singleChannelMeta = {
                 'contrast_limits': meta['contrast_limits'],
-                'multiscale': meta['multiscale'],
+                'multiscale': is_multiscale,
                 'metadata': meta['metadata'],
                 'scale': singleChannelScale,
                 'name': meta['name'][cc]
@@ -150,8 +150,9 @@ def ims_reader(path: str, resLevel: int = 0, colorsIndependant: bool = False, pr
         else:
             meta["scale"] = scale
 
-        return [(data, meta)] if meta["multiscale"] else [(data[0], meta)]
+        meta["multiscale"] = True if isinstance(data, list) else False
 
+        return [(data, meta)] if meta["multiscale"] else [(data[0], meta)]
 
 @napari_hook_implementation
 def napari_get_reader(path):
